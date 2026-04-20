@@ -68,6 +68,7 @@ async def analyze_cv(
     return {
         "status": "success",
         "ai_score": round(ai_score),
+        "version": "yake_v1", # السطر ده عشان نتأكد
         "keywords": list(jd_keywords),       # دي هتتعرض كـ Requirements
         "matched_keywords": matched_keywords # دي هتنور بالأخضر في الـ UI
     }
