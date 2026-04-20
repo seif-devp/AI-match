@@ -1,5 +1,6 @@
 fastapi
 uvicorn
-PyPDF2
 python-multipart
+PyPDF2
+lever-resume-parser
 spacy
