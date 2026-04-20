@@ -1,26 +1,18 @@
+import re
+import yake
 from fastapi import FastAPI, File, UploadFile, Form
-from sklearn.feature_extraction.text import TfidfVectorizer, ENGLISH_STOP_WORDS
 import PyPDF2
 import io
 import uvicorn
-import re
 
 app = FastAPI()
 
-# القاموس الأسود (عشان نمنع كلمات الحشو الإدارية من الاستخراج)
-CUSTOM_STOP_WORDS = [
-    "used", "using", "implemented", "developed", "worked", "created", "built", 
-    "experience", "skills", "education", "university", "project", "projects", 
-    "app", "application", "software", "system", "designed", "managed", "team",
-    "year", "years", "month", "months", "knowledge", "good", "excellent", "high",
-    "end", "hands", "ensure", "platforms", "systems", "management", "delivery",
-    "development", "standards", "lead", "business", "working", "requirements", 
-    "role", "practices", "technology", "technical", "understanding", "deep", 
-    "proven", "strong", "ability", "responsibilities", "ideal", "candidate",
-    "mobile", "apps", "performance", "architecture", "key", "seeking", "visionary",
-    "related", "field", "degree", "science", "understanding", "cycle", "principles"
-]
-ALL_STOP_WORDS = list(ENGLISH_STOP_WORDS) + CUSTOM_STOP_WORDS
+# إعداد YAKE لاستخراج الكلمات المفتاحية
+# n=2 (بيستخرج كلمات مفردة ومركبة)، top=25 (أهم 25 كلمة)
+kw_extractor = yake.KeywordExtractor(lan="en", n=2, dedupLim=0.9, top=25, features=None)
+
+# قائمة بسيطة لتنظيف النتائج من كلمات الحشو الإدارية اللي YAKE ممكن يلقطها
+TRASH_WORDS = ["team", "experience", "development", "company", "requirements", "skills", "years", "working", "software"]
 
 def extract_text_from_pdf(pdf_bytes: bytes) -> str:
     text = ""
@@ -35,12 +27,11 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> str:
     return text
 
 def clean_text(text: str) -> str:
+    # بنسيب الحروف الكابيتال زي ما هي عشان YAKE بيعتمد عليها في استخراج المهارات (زي MVC, RN)
     text = re.sub(r'[^a-zA-Z\s]', ' ', text)
-    text = text.lower()
-    # توحيد الاختصارات عشان لو الـ JD كاتب RN وإنت كاتب React Native
-    text = text.replace("rn ", "react native ")
+    # توحيد بعض الاختصارات يدوياً قبل الاستخراج
+    text = text.replace(" RN ", " React Native ")
     text = text.replace("rest apis", "api")
-    text = text.replace("rest api", "api")
     return text
 
 @app.post("/analyze")
@@ -56,27 +47,19 @@ async def analyze_cv(
 
     clean_cv = clean_text(raw_cv_text)
     clean_jd = clean_text(jd_text)
-    
-    try:
-        # 1. Extraction from Job Description (استخراج أهم 20 مصطلح من الوظيفة)
-        jd_vectorizer = TfidfVectorizer(stop_words=ALL_STOP_WORDS, ngram_range=(1, 2), max_features=20)
-        jd_vectorizer.fit([clean_jd])
-        jd_keywords = set(jd_vectorizer.get_feature_names_out())
 
-        # 2. Extraction from CV (استخراج أهم 40 مصطلح من السيرة الذاتية)
-        # بندي الـ CV فرصة أكبر (40 كلمة) عشان نطلع كل مهارات المتقدم
-        cv_vectorizer = TfidfVectorizer(stop_words=ALL_STOP_WORDS, ngram_range=(1, 2), max_features=40)
-        cv_vectorizer.fit([clean_cv])
-        cv_keywords = set(cv_vectorizer.get_feature_names_out())
-        
-    except ValueError:
-        return {"status": "error", "message": "Text is too short for extraction."}
+    # 1. استخراج الكلمات من الـ Job Description (Extraction 1)
+    jd_extracted = kw_extractor.extract_keywords(clean_jd)
+    jd_keywords = set([kw[0].lower() for kw in jd_extracted if kw[0].lower() not in TRASH_WORDS])
 
-    # 3. المقارنة (Intersection)
-    # بنجيب الكلمات المشتركة بين المجموعتين
+    # 2. استخراج الكلمات من الـ CV (Extraction 2)
+    cv_extracted = kw_extractor.extract_keywords(clean_cv)
+    cv_keywords = set([kw[0].lower() for kw in cv_extracted])
+
+    # 3. المقارنة لاستخراج الكلمات المشتركة (Intersection)
     matched_keywords = list(jd_keywords.intersection(cv_keywords))
-    
-    # 4. حساب نسبة التطابق بناءً على الكلمات المشتركة
+
+    # 4. حساب النسبة
     if len(jd_keywords) == 0:
         ai_score = 0
     else:
@@ -85,9 +68,8 @@ async def analyze_cv(
     return {
         "status": "success",
         "ai_score": round(ai_score),
-        "jd_keywords": list(jd_keywords),    # الكلمات المستخرجة من الوظيفة (للعرض في فلاتر)
-        "cv_keywords": list(cv_keywords),    # الكلمات المستخرجة من الـ CV 
-        "matched_keywords": matched_keywords # الكلمات المتطابقة (عشان تلونها أخضر في الـ UI)
+        "keywords": list(jd_keywords),       # دي هتتعرض كـ Requirements
+        "matched_keywords": matched_keywords # دي هتنور بالأخضر في الـ UI
     }
 
 if __name__ == "__main__":
