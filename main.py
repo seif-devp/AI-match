@@ -1,23 +1,26 @@
 import re
-import yake
 from fastapi import FastAPI, File, UploadFile, Form
 import PyPDF2
 import io
 import uvicorn
+import spacy
+import spacy.cli
 
 app = FastAPI()
 
-# إعداد YAKE لاستخراج الكلمات المفتاحية
-kw_extractor = yake.KeywordExtractor(lan="en", n=2, dedupLim=0.9, top=20, features=None)
+# تحميل الموديل الذكي والخفيف من spaCy (حجمه 12 ميجا بس وبيفهم الجرامر)
+try:
+    nlp = spacy.load("en_core_web_sm")
+except OSError:
+    print("Downloading spaCy model...")
+    spacy.cli.download("en_core_web_sm")
+    nlp = spacy.load("en_core_web_sm")
 
-# زودنا كلمات الحشو اللي طلعت المرة اللي فاتت عشان الموديل ينظفها أوتوماتيك
+# قائمة كلمات الحشو الإدارية اللي مش عايزينها تطلع في المتطلبات
 TRASH_WORDS = [
     "team", "experience", "development", "company", "requirements", "skills", 
-    "years", "working", "software", "good understanding", "solid understanding", 
-    "benefits flexible", "required soft", "mobile software", "engineer requirements", 
-    "required technical", "software engineering", "work independently", 
-    "mobile engineer", "mobile development", "requirements required", 
-    "software engineer", "mobile experiences", "team required", "experienced mobile"
+    "years", "working", "software", "understanding", "work", "knowledge", "ability",
+    "role", "environment", "benefits", "salary", "projects", "candidate", "opportunity"
 ]
 
 def extract_text_from_pdf(pdf_bytes: bytes) -> str:
@@ -33,11 +36,26 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> str:
     return text
 
 def clean_text(text: str) -> str:
-    # شيلنا السطر اللي بيمسح الفواصل والنقط! هنسيب النص بطبيعته عشان YAKE يفهم الجمل.
-    # هنكتفي بتوحيد الاختصارات بس
-    text = text.replace(" RN ", " React Native ")
+    text = re.sub(r'[^a-zA-Z\s]', ' ', text)
+    text = text.replace(" rn ", " react native ")
     text = text.replace("rest apis", "api")
     return text
+
+def extract_smart_keywords(text: str) -> list:
+    doc = nlp(text)
+    keywords = set()
+    
+    # استخراج "الكتل الاسمية" لأن المهارات دايماً بتكون أسماء مش أفعال
+    for chunk in doc.noun_chunks:
+        # بنشيل أدوات التعريف زي a, an, the عشان الكلمة تطلع نظيفة
+        clean_chunk = " ".join([token.text for token in chunk if token.pos_ != "DET"])
+        clean_chunk = clean_chunk.lower().strip()
+        
+        # بنفلتر الكلمات الإدارية، وبنأكد إن المصطلح ميزيدش عن 3 كلمات
+        if clean_chunk and clean_chunk not in TRASH_WORDS and len(clean_chunk.split()) <= 3:
+            keywords.add(clean_chunk)
+            
+    return list(keywords)
 
 @app.post("/analyze")
 async def analyze_cv(
@@ -53,17 +71,15 @@ async def analyze_cv(
     clean_cv = clean_text(raw_cv_text)
     clean_jd = clean_text(jd_text)
 
-    # 1. استخراج الكلمات من الـ Job Description
-    jd_extracted = kw_extractor.extract_keywords(clean_jd)
-    jd_keywords = set([kw[0].lower() for kw in jd_extracted if kw[0].lower() not in TRASH_WORDS])
+    # 1. استخراج الكلمات الذكية من الوظيفة (JD)
+    jd_keywords = extract_smart_keywords(clean_jd)
 
-    # 2. البحث الذكي جوه الـ CV
-    # هندور على متطلبات الوظيفة جوه نص السيرة الذاتية مباشرة عشان منضيعش ولا كلمة
+    # 2. البحث عن هذه الكلمات في السيرة الذاتية (CV)
+    # المرة دي هندور على المهارات المطلوبة جوه الـ CV عشان منضيعش ولا كلمة
     matched_keywords = []
     cv_text_lower = clean_cv.lower()
 
     for kw in jd_keywords:
-        # استخدام Regex للبحث عن الكلمة كاملة (عشان ميتلخبطش بين dart و darting مثلاً)
         if re.search(rf'\b{re.escape(kw)}\b', cv_text_lower):
             matched_keywords.append(kw)
 
@@ -76,8 +92,8 @@ async def analyze_cv(
     return {
         "status": "success",
         "ai_score": round(ai_score),
-        "version": "yake_v2", # غيرنا النسخة عشان نتأكد إن التحديث سمع
-        "keywords": list(jd_keywords),
+        "version": "spacy_nlp_v1", # ده الإصدار الجديد الخفيف والذكي
+        "keywords": jd_keywords,
         "matched_keywords": matched_keywords
     }
 
