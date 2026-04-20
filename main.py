@@ -1,5 +1,5 @@
 from fastapi import FastAPI, File, UploadFile, Form
-from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.feature_extraction.text import TfidfVectorizer, ENGLISH_STOP_WORDS
 import PyPDF2
 import io
 import uvicorn
@@ -7,16 +7,20 @@ import re
 
 app = FastAPI()
 
-# 1. قاموس المهارات التقنية (Whitelist)
-# الموديل مش هيشوف أي كلمة بره القاموس ده. تقدر تزود فيه أي مهارات تانية.
-TECH_SKILLS_VOCAB = [
-    "flutter", "dart", "ios", "android", "native", "react native", "swift", "kotlin",
-    "sap", "commerce cloud", "analytics", "ga4", "mixpanel", "firebase",
-    "devops", "ci cd", "github actions", "bitbucket", "codemagic",
-    "state management", "widgets", "architecture", "design patterns", "mvvm",
-    "bff", "api", "rest", "backend", "security", "performance tuning",
-    "agile", "scrum", "ui", "ux", "sqlite", "caching", "notifications"
+# القاموس الأسود (عشان نمنع كلمات الحشو الإدارية من الاستخراج)
+CUSTOM_STOP_WORDS = [
+    "used", "using", "implemented", "developed", "worked", "created", "built", 
+    "experience", "skills", "education", "university", "project", "projects", 
+    "app", "application", "software", "system", "designed", "managed", "team",
+    "year", "years", "month", "months", "knowledge", "good", "excellent", "high",
+    "end", "hands", "ensure", "platforms", "systems", "management", "delivery",
+    "development", "standards", "lead", "business", "working", "requirements", 
+    "role", "practices", "technology", "technical", "understanding", "deep", 
+    "proven", "strong", "ability", "responsibilities", "ideal", "candidate",
+    "mobile", "apps", "performance", "architecture", "key", "seeking", "visionary",
+    "related", "field", "degree", "science", "understanding", "cycle", "principles"
 ]
+ALL_STOP_WORDS = list(ENGLISH_STOP_WORDS) + CUSTOM_STOP_WORDS
 
 def extract_text_from_pdf(pdf_bytes: bytes) -> str:
     text = ""
@@ -31,9 +35,13 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> str:
     return text
 
 def clean_text(text: str) -> str:
-    # إزالة الرموز وتحويل النص لحروف صغيرة
     text = re.sub(r'[^a-zA-Z\s]', ' ', text)
-    return text.lower()
+    text = text.lower()
+    # توحيد الاختصارات عشان لو الـ JD كاتب RN وإنت كاتب React Native
+    text = text.replace("rn ", "react native ")
+    text = text.replace("rest apis", "api")
+    text = text.replace("rest api", "api")
+    return text
 
 @app.post("/analyze")
 async def analyze_cv(
@@ -49,29 +57,26 @@ async def analyze_cv(
     clean_cv = clean_text(raw_cv_text)
     clean_jd = clean_text(jd_text)
     
-    # 2. إجبار الموديل على استخدام قاموس المهارات فقط
-    # ngram_range=(1, 2) عشان يقرا المهارات المكونة من كلمتين زي "state management"
-    vectorizer = CountVectorizer(vocabulary=TECH_SKILLS_VOCAB, ngram_range=(1, 2))
-    
     try:
-        # استخراج المهارات الموجودة في الـ Job Description فقط
-        jd_matrix = vectorizer.fit_transform([clean_jd])
-        jd_vector = jd_matrix.toarray().flatten()
-        
-        # تجميع المهارات اللي ظهرت في الـ JD
-        jd_keywords = [TECH_SKILLS_VOCAB[i] for i in range(len(TECH_SKILLS_VOCAB)) if jd_vector[i] > 0]
+        # 1. Extraction from Job Description (استخراج أهم 20 مصطلح من الوظيفة)
+        jd_vectorizer = TfidfVectorizer(stop_words=ALL_STOP_WORDS, ngram_range=(1, 2), max_features=20)
+        jd_vectorizer.fit([clean_jd])
+        jd_keywords = set(jd_vectorizer.get_feature_names_out())
+
+        # 2. Extraction from CV (استخراج أهم 40 مصطلح من السيرة الذاتية)
+        # بندي الـ CV فرصة أكبر (40 كلمة) عشان نطلع كل مهارات المتقدم
+        cv_vectorizer = TfidfVectorizer(stop_words=ALL_STOP_WORDS, ngram_range=(1, 2), max_features=40)
+        cv_vectorizer.fit([clean_cv])
+        cv_keywords = set(cv_vectorizer.get_feature_names_out())
         
     except ValueError:
-        return {"status": "error", "message": "Error processing Job Description."}
+        return {"status": "error", "message": "Text is too short for extraction."}
 
-    # 3. البحث عن هذه المهارات داخل الـ CV
-    matched_keywords = []
-    for kw in jd_keywords:
-        # البحث عن المهارة ككلمة مستقلة
-        if re.search(rf'\b{re.escape(kw)}\b', clean_cv):
-            matched_keywords.append(kw)
-
-    # 4. حساب نسبة التطابق
+    # 3. المقارنة (Intersection)
+    # بنجيب الكلمات المشتركة بين المجموعتين
+    matched_keywords = list(jd_keywords.intersection(cv_keywords))
+    
+    # 4. حساب نسبة التطابق بناءً على الكلمات المشتركة
     if len(jd_keywords) == 0:
         ai_score = 0
     else:
@@ -80,8 +85,9 @@ async def analyze_cv(
     return {
         "status": "success",
         "ai_score": round(ai_score),
-        "keywords": jd_keywords,           # دي المتطلبات التقنية الصافية للوظيفة
-        "matched_keywords": matched_keywords # دي المهارات اللي المتقدم يعرفها
+        "jd_keywords": list(jd_keywords),    # الكلمات المستخرجة من الوظيفة (للعرض في فلاتر)
+        "cv_keywords": list(cv_keywords),    # الكلمات المستخرجة من الـ CV 
+        "matched_keywords": matched_keywords # الكلمات المتطابقة (عشان تلونها أخضر في الـ UI)
     }
 
 if __name__ == "__main__":
