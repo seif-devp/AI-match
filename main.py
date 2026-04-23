@@ -1,60 +1,114 @@
-import os
-from fastapi import FastAPI, File, UploadFile, Form
-import uvicorn
-from leverparser import ResumeParser
-import tempfile
+from fastapi import FastAPI, UploadFile, File, Form
+import spacy
+import re
+import fitz  # PyMuPDF
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
-app = FastAPI()
+app = FastAPI(title="CV Matcher API (PDF Support)")
 
-@app.post("/analyze")
-async def analyze_cv(
+nlp = spacy.load("en_core_web_sm")
+
+
+# ---------------------------
+# Extract text from PDF
+# ---------------------------
+
+def extract_text_from_pdf(pdf_bytes):
+
+    text = ""
+
+    with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+
+        for page in doc:
+
+            text += page.get_text()
+
+    return text
+
+
+# ---------------------------
+# Clean text
+# ---------------------------
+
+def clean_text(text):
+
+    text = text.lower()
+
+    text = re.sub(r"[^\w\s]", " ", text)
+
+    return text
+
+
+# ---------------------------
+# Extract keywords
+# ---------------------------
+
+def extract_keywords(text):
+
+    doc = nlp(text)
+
+    keywords = []
+
+    for token in doc:
+
+        if token.pos_ in ["NOUN", "PROPN", "ADJ", "NUM"]:
+
+            keywords.append(token.text)
+
+    return list(set(keywords))
+
+
+# ---------------------------
+# Similarity score
+# ---------------------------
+
+def similarity_score(cv_text, job_text):
+
+    vectorizer = TfidfVectorizer(stop_words="english")
+
+    vectors = vectorizer.fit_transform([cv_text, job_text])
+
+    score = cosine_similarity(vectors[0], vectors[1])
+
+    return float(score[0][0])
+
+
+# ---------------------------
+# API Endpoint
+# ---------------------------
+
+@app.post("/match-pdf")
+
+async def match_pdf(
     cv_file: UploadFile = File(...),
-    jd_text: str = Form(...)
+    job_description: str = Form(...)
 ):
-    # 1. حفظ ملف الـ PDF مؤقتاً لأن ResumeParser بيحتاج مسار ملف (Path)
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
-        content = await cv_file.read()
-        temp_pdf.write(content)
-        temp_path = temp_pdf.name
 
-    try:
-        # 2. تشغيل الـ Parser النضيف
-        parser = ResumeParser()
-        resume_data = parser.parse(temp_path)
+    pdf_bytes = await cv_file.read()
 
-        # استخراج المهارات وسنين الخبرة من الـ CV
-        cv_skills = [s.lower() for s in resume_data.skills]
-        years_of_exp = resume_data.get_years_experience()
+    cv_text = extract_text_from_pdf(pdf_bytes)
 
-        # 3. استخراج مهارات الـ JD (هنستخدم Parser برضه للنص)
-        # بما إن الـ Parser بياخد ملفات، هنكتب الـ JD في ملف مؤقت برضه
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".txt") as temp_jd:
-            temp_jd.write(jd_text.encode('utf-8'))
-            jd_data = parser.parse(temp_jd.name)
-            jd_skills = [s.lower() for s in jd_data.skills]
+    cv_clean = clean_text(cv_text)
 
-        # 4. المقارنة
-        matched_keywords = list(set(jd_skills).intersection(set(cv_skills)))
-        
-        # حساب السكور (بناءً على المهارات المشتركة)
-        if not jd_skills:
-            score = 0
-        else:
-            score = (len(matched_keywords) / len(jd_skills)) * 100
+    job_clean = clean_text(job_description)
 
-        return {
-            "status": "success",
-            "ai_score": round(score),
-            "version": "lever_parser_v1",
-            "experience_years": years_of_exp,
-            "keywords": jd_skills,
-            "matched_keywords": matched_keywords
-        }
+    cv_keywords = extract_keywords(cv_clean)
 
-    finally:
-        # مسح الملفات المؤقتة عشان الرامات والديسك
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
-    
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    job_keywords = extract_keywords(job_clean)
+
+    score = similarity_score(cv_clean, job_clean)
+
+    matched_keywords = list(set(cv_keywords) & set(job_keywords))
+
+    return {
+
+        "similarity_score": round(score * 100, 2),
+
+        "matched_keywords": matched_keywords,
+
+        "cv_keywords": cv_keywords,
+
+        "job_keywords": job_keywords
+
+    }
