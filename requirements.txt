@@ -1,7 +1,6 @@
 fastapi
 uvicorn
-spacy
-scikit-learn
-pymupdf
+PyMuPDF
+google-genai
+pydantic
 python-multipart
-nltk
